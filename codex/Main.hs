@@ -72,16 +72,7 @@ writeCacheHash cx = writeFile $ hashFile cx
 
 update :: Bool -> Codex -> Builder -> IO ()
 update force cx bldr = displayConsoleRegions $ do
-#if MIN_VERSION_hackage_db(2,0,0)
-  (mpid, dependencies, workspaceProjects') <- case bldr of
-       Cabal -> do
-         tb <- DB.hackageTarball
-         resolveCurrentProjectDependencies bldr tb
-       Stack _ -> resolveCurrentProjectDependencies bldr $ hackagePath cx
-#else
-  (mpid, dependencies, workspaceProjects') <-
-    resolveCurrentProjectDependencies bldr (hackagePath cx)
-#endif
+  (mpid, dependencies, workspaceProjects') <- resolveCurrentProjectDependencies bldr (hackagePath cx)
   projectHash <- computeCurrentProjectHash cx
   shouldUpdate <-
     if null workspaceProjects' then

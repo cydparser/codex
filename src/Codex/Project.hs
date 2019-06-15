@@ -15,7 +15,7 @@ import Data.List (delete, isPrefixOf, union)
 import Data.Maybe
 import Distribution.InstalledPackageInfo
 #if MIN_VERSION_hackage_db(2,0,0)
-import Distribution.Hackage.DB (HackageDB, cabalFile, readTarball)
+import Distribution.Hackage.DB (HackageDB, cabalFile, hackageTarball, readTarball)
 #else
 import Distribution.Hackage.DB (Hackage, readHackage')
 #endif
@@ -194,24 +194,25 @@ withinRange' =
 #endif
 
 resolvePackageDependencies :: Builder -> FilePath -> FilePath -> GenericPackageDescription -> IO [PackageIdentifier]
-resolvePackageDependencies bldr hackagePath root pd = do
+resolvePackageDependencies bldr _hackagePath root pd = do
   xs <- either fallback return =<< resolveInstalledDependencies bldr root pd
   return xs where
     fallback e = do
       putStrLn $ concat ["codex: ", show e]
       putStrLn "codex: *warning* falling back on dependency resolution using hackage"
-      resolveWithHackage
-    resolveWithHackage = do
-#if MIN_VERSION_hackage_db(2,0,0)
-      db <- readTarball Nothing (hackagePath </> "00-index.tar")
-        <|> readTarball Nothing (hackagePath </> "01-index.tar")
-#else
-      db <- readHackage' (hackagePath </> "00-index.tar")
-        <|> readHackage' (hackagePath </> "01-index.tar")
-#endif
+      db <- readHackageTarball -- hackagePath
       return $ identifier <$> resolveHackageDependencies db pd
 
+readHackageTarball :: IO HackageDB
+-- readHackageTarball :: FilePath -> IO HackageDB
+#if MIN_VERSION_hackage_db(2,0,0)
+readHackageTarball = readTarball Nothing =<< hackageTarball
+#else
+readHackageTarball = undefined -- XXX
+#endif
+
 resolveSandboxDependencies :: FilePath -> IO [WorkspaceProject]
+-- resolveSandboxDependencies :: IO [WorkspaceProject]
 resolveSandboxDependencies root =
   findSandbox root >>= maybe (return []) continue
  where
