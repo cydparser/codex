@@ -19,7 +19,6 @@ migrate :: Codex -> New.Codex
 migrate cx =
   New.Codex
     True
-    (hackagePath cx)
     New.defaultStackOpts
     (tagsCmd cx)
     (tagsFileHeader cx)

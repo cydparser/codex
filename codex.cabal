@@ -65,6 +65,7 @@ executable codex
     Main.Config.Codex1
     Main.Config.Codex2
     Main.Config.Codex3
+    Main.Config.Codex4
     Paths_codex
   build-depends:
       ascii-progress

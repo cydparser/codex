@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Main (main) where
 
@@ -7,13 +8,16 @@ import Control.Applicative ((<$>))
 import Data.Traversable (traverse)
 #endif
 
+import Control.Applicative ((<|>))
 import Control.Arrow
 import Control.Exception (try, SomeException)
 import Control.Monad
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except
+import Control.Monad.Trans.Maybe (runMaybeT)
 import Data.Either
 import Data.List
+import Data.Maybe (fromMaybe)
 import qualified Distribution.Hackage.DB as DB
 import Distribution.Text
 import Network.Socket (withSocketsDo)
@@ -57,8 +61,11 @@ cleanCache (bldr, cx) = do
     safe = (try :: IO a -> IO (Either SomeException a))
     removeTagFiles = traverse (safe . removeFile) . fmap (</> "tags")
     traverseDirectories = fmap rights . traverse (safe . listDirectory)
-    builderOp (Stack _) = traverseDirectories . concat
-    builderOp Cabal = return
+
+    builderOp = \case
+      Cabal   -> pure
+      CabalV2 -> pure
+      Stack   -> traverseDirectories . concat
 
 readCacheHash :: Codex -> IO (Maybe String)
 readCacheHash cx = do
@@ -72,16 +79,7 @@ writeCacheHash cx = writeFile $ hashFile cx
 
 update :: Bool -> Codex -> Builder -> IO ()
 update force cx bldr = displayConsoleRegions $ do
-#if MIN_VERSION_hackage_db(2,0,0)
-  (mpid, dependencies, workspaceProjects') <- case bldr of
-       Cabal -> do
-         tb <- DB.hackageTarball
-         resolveCurrentProjectDependencies bldr tb
-       Stack _ -> resolveCurrentProjectDependencies bldr $ hackagePath cx
-#else
-  (mpid, dependencies, workspaceProjects') <-
-    resolveCurrentProjectDependencies bldr (hackagePath cx)
-#endif
+  (mpid, dependencies, workspaceProjects') <- resolveCurrentProjectDependencies bldr
   projectHash <- computeCurrentProjectHash cx
   shouldUpdate <-
     if null workspaceProjects' then
@@ -162,22 +160,7 @@ main = withSocketsDo $ do
 
     toBuilderConfig cx' = checkConfig cx' >>= \state -> case state of
       TaggerNotFound  -> fail' $ "codex: tagger not found."
-      Ready           -> do
-        stackFileExists <- doesFileExist $ "." </> "stack.yaml"
-        stackWorkExists <- doesDirectoryExist $ "." </> ".stack-work"
-        if stackFileExists && stackWorkExists then do
-            (ec, _, _) <- readCreateProcessWithExitCode (shell "which stack") ""
-            case ec of
-                ExitSuccess -> do
-                    let opts = stackOpts cx'
-                    globalPath <- readStackPath opts "stack-root"
-                    binPath <- readStackPath opts "bin-path"
-                    path <- getEnv "PATH"
-                    setEnv "PATH" $ concat [path, ":", binPath]
-                    return (Stack opts, cx' { hackagePath = globalPath </> "indices" </> "Hackage" })
-                _ ->
-                    return (Cabal, cx')
-        else return (Cabal, cx')
+      Ready           -> finalizeConfig cx'
 
     withConfig cx' f = do
       (bldr, cx) <- toBuilderConfig cx'

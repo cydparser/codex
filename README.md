@@ -56,3 +56,4 @@ Put this in your `.vimrc`:
       
   (ref: https://github.com/aloiscochard/codex/issues/36)
 
+# XXX document now config

@@ -1,12 +1,18 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 module Codex.Internal where
 
 #if !MIN_VERSION_base(4,8,0)
 import Control.Applicative ((<$>))
 #endif
 
+import Data.Functor.Identity
 import Data.Char (isSpace)
 import Data.Yaml
 import Data.Maybe (mapMaybe)
@@ -26,25 +32,63 @@ defaultStackOpts = ""
 defaultTagsFileName :: FilePath
 defaultTagsFileName = "codex.tags"
 
-data Builder = Cabal | Stack String
+data Builder
+  = Cabal
+  | CabalV2
+  | Stack
+  deriving (Generic, Show)
 
-data Codex = Codex
+instance ToJSON Builder
+instance FromJSON Builder
+
+data Tagger = Ctags | Hasktags | HasktagsEmacs | HasktagsExtended
+
+taggerCmd :: Tagger -> String
+taggerCmd Ctags = "ctags --tag-relative=no --recurse -f \"$TAGS\" \"$SOURCES\""
+taggerCmd Hasktags = "hasktags --ctags --follow-symlinks --output=\"$TAGS\" \"$SOURCES\""
+taggerCmd HasktagsEmacs = "hasktags --etags --follow-symlinks --output=\"$TAGS\" \"$SOURCES\""
+taggerCmd HasktagsExtended = "hasktags --ctags --follow-symlinks --extendedctag --output=\"$TAGS\" \"$SOURCES\""
+
+type Codex = Codex' Identity
+
+type CodexYaml = Codex' Maybe
+
+data Codex' f = Codex
   { currentProjectIncluded :: Bool
-  , hackagePath :: FilePath
-  , stackOpts :: String
-  , tagsCmd :: String
-  , tagsFileHeader :: Bool
-  , tagsFileSorted :: Bool
-  , tagsFileName :: FilePath }
-    deriving Show
+  , stackOpts              :: String
+  , tagsCmd                :: String
+  , tagsFileHeader         :: Bool
+  , tagsFileSorted         :: Bool
+  , tagsFileName           :: FilePath
+  , builder                :: f Builder      -- ^ Always use this builder.
+  , workspaceDir           :: Maybe FilePath -- ^ Treat packages in dir as part of project.
+  }
 
-deriving instance Generic Codex
-instance ToJSON Codex
-instance FromJSON Codex
+deriving instance (Show (f Builder)) => Show (Codex' f)
+deriving instance Generic CodexYaml
+instance ToJSON CodexYaml
+instance FromJSON CodexYaml
 
-hackagePathOf :: Builder -> Codex -> FilePath
-hackagePathOf Cabal     cx = hackagePath cx
-hackagePathOf (Stack _) cx = hackagePath cx </> "packages"
+-- XXX
+-- instance ToJSON Codex where
+--   toJSON codex = toJSON codex
+--     { builder = Nothing
+--     }
+
+codexBuilder :: Codex -> Builder
+codexBuilder = runIdentity . builder
+
+defaultConfig :: CodexYaml
+defaultConfig = Codex
+  { currentProjectIncluded = True
+  , stackOpts              = defaultStackOpts
+  , tagsCmd                = taggerCmd Hasktags
+  , tagsFileHeader         = True
+  , tagsFileSorted         = True
+  , tagsFileName           = defaultTagsFileName
+  , builder                = Nothing
+  , workspaceDir           = Nothing
+  }
 
 packagePath :: FilePath -> PackageIdentifier -> FilePath
 packagePath root i = root </> relativePath i where

@@ -15,7 +15,7 @@ import Data.List (delete, isPrefixOf, union)
 import Data.Maybe
 import Distribution.InstalledPackageInfo
 #if MIN_VERSION_hackage_db(2,0,0)
-import Distribution.Hackage.DB (HackageDB, cabalFile, readTarball)
+import Distribution.Hackage.DB (HackageDB, cabalFile, hackageTarball, readTarball)
 #else
 import Distribution.Hackage.DB (Hackage, readHackage')
 #endif
@@ -43,11 +43,8 @@ import qualified Data.Map as Map
 import qualified Data.Version as Base
 #endif
 
+import Codex.HackageDB
 import Codex.Internal (Builder(..), stackListDependencies)
-
-#if MIN_VERSION_hackage_db(2,0,0)
-type Hackage = HackageDB
-#endif
 
 newtype Workspace = Workspace [WorkspaceProject]
   deriving (Eq, Show)
@@ -92,45 +89,50 @@ findCabalFilePath path = do
     dotCabal = (".cabal" ==) . takeExtension
     visible  = not . List.isPrefixOf "."
 
-resolveCurrentProjectDependencies :: Builder -> FilePath -> IO ProjectDependencies
-resolveCurrentProjectDependencies bldr hackagePath = do
+resolveCurrentProjectDependencies :: Builder -> IO ProjectDependencies
+resolveCurrentProjectDependencies bldr = do
   mps <- localPackages
   case mps of
-    Just ps -> resolveLocalDependencies bldr hackagePath ps
+    Just ps -> resolveLocalDependencies bldr ps
     Nothing -> do
       disableImplicitWorkspace <- isJust <$> lookupEnv "CODEX_DISABLE_WORKSPACE"
-      ws <- if disableImplicitWorkspace
-        then pure (Workspace [])
-        else getWorkspace ".."
-      resolveProjectDependencies bldr ws hackagePath "."
+      ws <- case workspaceDir of
+        Nothing  -> pure (Workspace [])
+        Just dir -> getWorkspace dir
+      resolveProjectDependencies bldr ws "."
   where
     localPackages = do
       mpath <-
         case bldr of
-          Cabal -> bool Nothing (Just ".") <$> doesFileExist "cabal.project"
-          Stack _ -> pure (Just ".")
+          Cabal   -> maybeCabalProject
+          CabalV2 -> maybeCabalProject
+          Stack   -> pure (Just ".")
       case mpath of
         Nothing   -> pure Nothing
         Just path -> Just <$> findLocalPackages 2 path
 
+    maybeCabalProject = bool Nothing (Just ".") <$> doesFileExist "cabal.project"
+
 -- | Resolve the dependencies of each local project package.
-resolveLocalDependencies :: Builder -> FilePath -> [WorkspaceProject] -> IO ProjectDependencies
-resolveLocalDependencies bldr hackagePath wps = do
+resolveLocalDependencies :: Codex -> [WorkspaceProject] -> IO ProjectDependencies
+resolveLocalDependencies Codex{..} wps = do
   pids <- foldr mergeDependencies mempty <$> traverse resolve wps
   pure (Nothing, pids, wps)
   where
     resolve p@WorkspaceProject{workspaceProjectPath = packagePath} =
       let ws' = Workspace (delete p wps)
-      in resolveProjectDependencies bldr ws' hackagePath packagePath
+      in resolveProjectDependencies bldr ws' packagePath
     mergeDependencies (_, pids, _) pids' =
       pids `union` pids'
 
 -- TODO Optimize
-resolveProjectDependencies :: Builder -> Workspace -> FilePath -> FilePath -> IO ProjectDependencies
-resolveProjectDependencies bldr ws hackagePath root = do
+resolveProjectDependencies :: Builder -> Workspace -> FilePath -> IO ProjectDependencies
+resolveProjectDependencies bldr ws root = do
   pd <- maybe (error "No cabal file found.") id <$> findPackageDescription root
-  xs <- resolvePackageDependencies bldr hackagePath root pd
-  ys <- resolveSandboxDependencies root
+  xs <- resolvePackageDependencies bldr root pd
+  ys <- case bldr of
+    Cabal -> resolveSandboxDependencies root
+    _     -> pure []
   let zs   = resolveWorkspaceDependencies ws pd
   let wsds = List.filter (shouldOverride xs) $ List.nubBy (on (==) prjId) $ concat [ys, zs]
   let pjds = List.filter (\x -> (((unPackageName . pkgName) x) /= "rts") && (List.notElem (pkgName x) $ fmap prjId wsds)) xs
@@ -140,9 +142,9 @@ resolveProjectDependencies bldr ws hackagePath root = do
       maybe True (\y -> pkgVersion x >= pkgVersion y) $ List.find (\y -> pkgName x == pkgName y) xs
     prjId = pkgName . workspaceProjectIdentifier
 
-resolveInstalledDependencies :: Builder -> FilePath -> GenericPackageDescription -> IO (Either SomeException [PackageIdentifier])
-resolveInstalledDependencies bldr root pd = try $ do
-  case bldr of
+resolveInstalledDependencies :: Codex -> FilePath -> GenericPackageDescription -> IO (Either SomeException [PackageIdentifier])
+resolveInstalledDependencies Codex{..} root pd = try $ do
+  case builder of
     Cabal -> do
       lbi <- withCabal
       let ipkgs = installedPkgs lbi
@@ -152,8 +154,9 @@ resolveInstalledDependencies bldr root pd = try $ do
           xs = fmap sourcePackageId $ ys
       return xs where
         withCabal = getPersistBuildConfig $ root </> "dist"
-    Stack cmd ->
-      filter (/= pid) <$> stackListDependencies cmd pname
+    CabalV2 -> undefined -- XXX plan.json
+    Stack ->
+      filter (/= pid) <$> stackListDependencies stackOpts pname
   where
     pid = pd & packageDescription & package
     pname = pid & pkgName & unPackageName
@@ -193,23 +196,36 @@ withinRange' =
 #endif
 #endif
 
-resolvePackageDependencies :: Builder -> FilePath -> FilePath -> GenericPackageDescription -> IO [PackageIdentifier]
-resolvePackageDependencies bldr hackagePath root pd = do
-  xs <- either fallback return =<< resolveInstalledDependencies bldr root pd
-  return xs where
+resolvePackageDependencies :: Builder -> FilePath -> GenericPackageDescription -> IO [PackageIdentifier]
+resolvePackageDependencies bldr root pd =
+  either fallback return =<< resolveInstalledDependencies bldr root pd
+  where
     fallback e = do
+      -- XXX TODO: what if Stack
       putStrLn $ concat ["codex: ", show e]
       putStrLn "codex: *warning* falling back on dependency resolution using hackage"
-      resolveWithHackage
-    resolveWithHackage = do
+      db <- readHackageTarball
+      pure $ identifier <$> resolveHackageDependencies db pd
+
+readHackageTarball :: IO Hackage
+readHackageTarball = do
 #if MIN_VERSION_hackage_db(2,0,0)
-      db <- readTarball Nothing (hackagePath </> "00-index.tar")
-        <|> readTarball Nothing (hackagePath </> "01-index.tar")
+  readTarball Nothing =<< hackageTarball
 #else
-      db <- readHackage' (hackagePath </> "00-index.tar")
-        <|> readHackage' (hackagePath </> "01-index.tar")
+  tarball <- do
+    -- Copied from hackage-db.
+    cabalDir <- getAppUserDataDirectory "cabal"
+    let htd = cabalDir </> "packages" </> "hackage.haskell.org"
+    let idx00 = htd </> "00-index.tar"
+        idx01 = htd </> "01-index.tar"
+
+    have01 <- doesFileExist idx01
+    if have01 then return idx01 else do
+      have00 <- doesFileExist idx00
+      if have00 then return idx00 else
+        throwIO NoHackageTarballFound
+  readHackage' tarball
 #endif
-      return $ identifier <$> resolveHackageDependencies db pd
 
 resolveSandboxDependencies :: FilePath -> IO [WorkspaceProject]
 resolveSandboxDependencies root =
@@ -258,4 +274,4 @@ findLocalPackages depth root =
       paths <- getDirectoryContents =<< canonicalizePath path
       filterM doesDirectoryExist ((path </>) <$> filter visible paths)
     visible path =
-      (not . isPrefixOf ".") path && path `notElem` ["dist", "dist-new"]
+      (not . isPrefixOf ".") path && path `notElem` ["dist", "dist-newstyle"]

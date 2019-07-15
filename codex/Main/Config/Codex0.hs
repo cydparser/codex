@@ -1,4 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE NamedFieldPuns #-}
+
 module Main.Config.Codex0 where
 
 import Data.Yaml
@@ -16,4 +18,6 @@ migrateWarn :: IO ()
 migrateWarn = return ()
 
 migrate :: Codex -> New.Codex
-migrate cx = New.Codex True (hackagePath cx) New.defaultStackOpts (tagsCmd cx) True True New.defaultTagsFileName
+migrate Codex{..} = New.defaultConfig
+  { tagsCmd
+  }

@@ -65,15 +65,6 @@ data Status = Source Tagging | Archive | Remote
 
 type Action = ExceptT String IO
 
-data Tagger = Ctags | Hasktags | HasktagsEmacs | HasktagsExtended
-  deriving (Eq, Show, Read)
-
-taggerCmd :: Tagger -> String
-taggerCmd Ctags = "ctags --tag-relative=no --recurse -f \"$TAGS\" \"$SOURCES\""
-taggerCmd Hasktags = "hasktags --ctags --follow-symlinks --output=\"$TAGS\" \"$SOURCES\""
-taggerCmd HasktagsEmacs = "hasktags --etags --follow-symlinks --output=\"$TAGS\" \"$SOURCES\""
-taggerCmd HasktagsExtended = "hasktags --ctags --follow-symlinks --extendedctag --output=\"$TAGS\" \"$SOURCES\""
-
 taggerCmdRun :: Codex -> FilePath -> FilePath -> Action FilePath
 taggerCmdRun cx sources tags' = do
   _ <- tryIO $ system command
